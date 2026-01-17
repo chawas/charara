@@ -1,0 +1,15 @@
+GitHub Setup Summary
+Repository: https://github.com/chawas/charara
+Created: Sat 17 Jan 2026 02:45:09 PM CAT
+
+
+Files created:
+- .gitignore
+- README.md
+- GitHub Actions workflow (if selected)
+
+Local commands:
+git add .
+git commit -m "Message"
+git push
+git pull origin main
