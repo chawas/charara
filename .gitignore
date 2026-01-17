@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Data files
+data/era5_downloads/*.nc
+data/era5_downloads/*.nc4
+output/
+logs/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store

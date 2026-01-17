@@ -1,0 +1,33 @@
+{
+  "project": {
+    "name": "Lake Kariba Floating Solar Wind Analysis",
+    "version": "1.0"
+  },
+  "analysis_period": {
+    "start_year": 2015,
+    "end_year": 2020
+  },
+  "paths": {
+    "base_directory": "/home/chawas/deployed/charara",
+    "data": {
+      "wind_data": "/home/chawas/deployed/charara/data/era5_downloads/wind_data_2015_2020.nc",
+      "era5_data": "/home/chawas/deployed/charara/data/era5_downloads/era5_data.nc",
+      "lake_shapefile": "/home/chawas/deployed/charara/data/shapefiles/lake_kariba.shp"
+    },
+    "scripts": "/home/chawas/deployed/charara/scripts",
+    "output": {
+      "base": "/home/chawas/deployed/charara/output",
+      "maps": "/home/chawas/deployed/charara/output/wind_maps",
+      "timeseries": "/home/chawas/deployed/charara/output/timeseries",
+      "statistics": "/home/chawas/deployed/charara/output/statistics",
+      "reports": "/home/chawas/deployed/charara/output/reports"
+    },
+    "templates": "/home/chawas/deployed/charara/templates",
+    "logs": "/home/chawas/deployed/charara/logs"
+  },
+  "location": {
+    "site_name": "Charara Floating Solar Site",
+    "latitude": -16.53,
+    "longitude": 28.83
+  }
+}

@@ -1,0 +1,705 @@
+#!/usr/bin/env python3
+"""
+Enhanced Wind Analysis for Lake Kariba Floating Solar
+Using JSON configuration for flexible path management
+"""
+
+import numpy as np
+import xarray as xr
+import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+import geopandas as gpd
+import pandas as pd
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
+
+# Add config manager
+sys.path.append(str(Path(__file__).parent))
+from config_manager import get_config
+
+# Initialize configuration
+config = get_config()
+
+class EnhancedWindAnalysis:
+    """
+    Enhanced wind analysis using JSON configuration
+    """
+    
+    def __init__(self):
+        """Initialize with configuration"""
+        self.config = config
+        self.logger = config.logger
+        
+        # Get analysis parameters
+        self.start_year = config.get('analysis_period.start_year')
+        self.end_year = config.get('analysis_period.end_year')
+        self.year_range = f"{self.start_year}_{self.end_year}"
+        
+        # Get file paths
+        self.wind_data_path = config.get_path('paths.data.wind_data')
+        self.era5_data_path = config.get_path('paths.data.era5_data')
+        self.lake_shapefile = config.get_path('paths.data.lake_shapefile')
+        
+        # Get location
+        self.charara_lat = config.get('location.latitude')
+        self.charara_lon = config.get('location.longitude')
+        self.site_name = config.get('location.site_name')
+        
+        # Get analysis parameters
+        self.thresholds = config.get('analysis_parameters.wind_speed_thresholds')
+        self.map_extent = config.get('analysis_parameters.map_extent')
+        
+        # Load data
+        self.load_data()
+        
+        self.logger.info(f"Wind analysis initialized for {self.start_year}-{self.end_year}")
+        self.logger.info(f"Site: {self.site_name} ({self.charara_lat}°S, {self.charara_lon}°E)")
+    
+    def load_data(self):
+        """Load wind data from configured paths"""
+        try:
+            self.logger.info(f"Loading wind data from: {self.wind_data_path}")
+            self.wind_ds = xr.open_dataset(self.wind_data_path)
+            
+            # Filter by year range
+            years = self.wind_ds['time'].dt.year
+            mask = (years >= self.start_year) & (years <= self.end_year)
+            self.wind_ds = self.wind_ds.where(mask, drop=True)
+            
+            self.logger.info(f"Data loaded successfully. Time range: {self.wind_ds['time'].min().values} to {self.wind_ds['time'].max().values}")
+            self.logger.info(f"Available variables: {list(self.wind_ds.data_vars)}")
+            
+        except FileNotFoundError as e:
+            self.logger.error(f"Wind data file not found: {e}")
+            raise
+        except Exception as e:
+            self.logger.error(f"Error loading wind data: {e}")
+            raise
+    
+    def create_seasonal_wind_maps(self):
+        """Create seasonal wind maps with Lake Kariba outline"""
+        self.logger.info("Creating seasonal wind maps...")
+        
+        # Extract wind speed
+        if 'wind_speed_100m' in self.wind_ds:
+            wind_speed = self.wind_ds['wind_speed_100m']
+        elif 'si10' in self.wind_ds:  # ERA5 wind speed at 10m
+            wind_speed = self.wind_ds['si10']
+            # Convert to 100m using wind profile (approx)
+            # wind_speed = wind_speed * 1.4  # Rough conversion
+        else:
+            self.logger.error("Wind speed variable not found in dataset")
+            return
+        
+        # Calculate seasonal averages
+        seasonal_avg = wind_speed.groupby('time.season').mean(dim='time')
+        
+        # Define seasons
+        seasons = ['DJF', 'MAM', 'JJA', 'SON']
+        season_names = {
+            'DJF': 'December-January-February',
+            'MAM': 'March-April-May',
+            'JJA': 'June-July-August',
+            'SON': 'September-October-November'
+        }
+        
+        # Create figure
+        fig, axes = plt.subplots(2, 2, figsize=(18, 14),
+                                subplot_kw={'projection': ccrs.PlateCarree()})
+        axes = axes.flatten()
+        
+        # Create custom colormap
+        colors_wind = plt.cm.viridis(np.linspace(0.2, 0.9, 10))
+        from matplotlib.colors import ListedColormap
+        cmap_wind = ListedColormap(colors_wind)
+        
+        # Plot each season
+        for idx, season in enumerate(seasons):
+            ax = axes[idx]
+            
+            try:
+                # Plot wind speed
+                im = seasonal_avg.sel(season=season).plot(
+                    ax=ax,
+                    transform=ccrs.PlateCarree(),
+                    cmap=cmap_wind,
+                    add_colorbar=False,
+                    vmin=self.config.get('analysis_parameters.wind_speed_range')[0],
+                    vmax=self.config.get('analysis_parameters.wind_speed_range')[1],
+                    extend='max'
+                )
+            except Exception as e:
+                self.logger.warning(f"Could not plot season {season}: {e}")
+                continue
+            
+            # Add map features
+            ax.coastlines(resolution='10m', linewidth=0.8)
+            ax.add_feature(cfeature.BORDERS, linewidth=0.5)
+            ax.add_feature(cfeature.LAKES, alpha=0.3, edgecolor='blue')
+            
+            # Add gridlines
+            gl = ax.gridlines(draw_labels=True, linewidth=0.5, alpha=0.5, linestyle='--')
+            gl.top_labels = False
+            gl.right_labels = False
+            
+            # Set map extent
+            ax.set_extent([
+                self.map_extent['min_lon'],
+                self.map_extent['max_lon'],
+                self.map_extent['min_lat'],
+                self.map_extent['max_lat']
+            ])
+            
+            # Add Lake Kariba
+            self._add_lake_kariba(ax)
+            
+            # Add Charara highlight
+            self._add_charara_highlight(ax)
+            
+            # Add title
+            season_full = season_names.get(season, season)
+            title = f'{season} ({season_full})\nWind Speed at 100m (m/s)\n{self.start_year}-{self.end_year}'
+            ax.set_title(title, fontsize=14, fontweight='bold', pad=15)
+            
+            # Add scale bar
+            self._add_scale_bar(ax)
+        
+        # Add colorbar
+        plt.tight_layout(rect=[0, 0.05, 1, 0.95])
+        cbar_ax = fig.add_axes([0.15, 0.03, 0.7, 0.02])
+        cbar = plt.colorbar(im, cax=cbar_ax, orientation='horizontal')
+        cbar.set_label('Wind Speed (m/s)', fontsize=12, fontweight='bold')
+        
+        # Add legend
+        from matplotlib.patches import Patch
+        import matplotlib.lines as mlines
+        
+        legend_elements = [
+            Patch(facecolor='blue', alpha=0.3, edgecolor='darkblue', 
+                  label='Lake Kariba'),
+            Patch(facecolor='none', edgecolor='red', linestyle='--',
+                  label='Charara Area'),
+            mlines.Line2D([], [], color='red', marker='*', linestyle='None',
+                         markersize=10, label=f'{self.site_name}')
+        ]
+        
+        fig.legend(handles=legend_elements, loc='upper center',
+                  bbox_to_anchor=(0.5, 0.01), ncol=3, fontsize=11)
+        
+        # Add main title
+        main_title = (f'Seasonal Wind Patterns at Lake Kariba\n'
+                     f'{self.start_year}-{self.end_year} Analysis\n'
+                     f'{self.site_name}')
+        fig.suptitle(main_title, fontsize=18, fontweight='bold', y=0.98)
+        
+        # Save figure
+        output_file = config.get_output_filename(
+            'seasonal_wind_maps_lake_kariba',
+            'png',
+            'maps'
+        )
+        plt.savefig(output_file, dpi=300, bbox_inches='tight', facecolor='white')
+        self.logger.info(f"Seasonal maps saved to: {output_file}")
+        
+        plt.show()
+        
+        return fig, axes
+    
+    def _add_lake_kariba(self, ax):
+        """Add Lake Kariba to map"""
+        # Try to load shapefile
+        if self.lake_shapefile and os.path.exists(self.lake_shapefile):
+            try:
+                lake_gdf = gpd.read_file(self.lake_shapefile)
+                lake_gdf.plot(ax=ax, color='blue', alpha=0.3,
+                            edgecolor='darkblue', linewidth=1.5,
+                            transform=ccrs.PlateCarree())
+                return
+            except Exception as e:
+                self.logger.warning(f"Could not load shapefile: {e}")
+        
+        # Draw approximate outline as fallback
+        lake_outline = np.array([
+            [27.0, -16.5], [27.5, -16.6], [28.0, -16.8], [28.5, -17.0],
+            [28.8, -17.2], [29.0, -17.5], [28.8, -17.7], [28.5, -17.8],
+            [28.0, -17.7], [27.5, -17.5], [27.0, -17.2], [26.8, -16.8],
+            [27.0, -16.5]
+        ])
+        ax.fill(lake_outline[:, 0], lake_outline[:, 1],
+                color='blue', alpha=0.3, transform=ccrs.PlateCarree())
+        ax.plot(lake_outline[:, 0], lake_outline[:, 1],
+                color='darkblue', linewidth=1.5, transform=ccrs.PlateCarree())
+    
+    def _add_charara_highlight(self, ax):
+        """Add Charara area highlight to map"""
+        radius = config.get('analysis_parameters.charara_highlight_radius', 0.2)
+        
+        # Add circle
+        from matplotlib.patches import Circle
+        circle = Circle((self.charara_lon, self.charara_lat), radius,
+                       color='red', fill=False, linewidth=2, linestyle='--',
+                       transform=ccrs.PlateCarree())
+        ax.add_patch(circle)
+        
+        # Add marker
+        ax.scatter(self.charara_lon, self.charara_lat,
+                  color='red', s=200, marker='*', edgecolor='white',
+                  linewidth=2, transform=ccrs.PlateCarree(), zorder=10)
+        
+        # Add label
+        ax.text(self.charara_lon + 0.05, self.charara_lat - 0.05,
+               f'{self.site_name}\n({abs(self.charara_lat):.2f}°S, {self.charara_lon:.2f}°E)',
+               fontsize=10, color='red', fontweight='bold',
+               transform=ccrs.PlateCarree(),
+               bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                        alpha=0.9, edgecolor='red'))
+    
+    def _add_scale_bar(self, ax, length_km=50):
+        """Add scale bar to map"""
+        length_deg = length_km / 111.0
+        
+        x_min, x_max = ax.get_xlim()
+        y_min, y_max = ax.get_ylim()
+        
+        x_pos = x_min + 0.08 * (x_max - x_min)
+        y_pos = y_min + 0.08 * (y_max - y_min)
+        
+        ax.plot([x_pos, x_pos + length_deg], [y_pos, y_pos],
+               color='black', linewidth=3, transform=ccrs.PlateCarree())
+        
+        ax.text(x_pos + length_deg/2, y_pos - 0.02, f'{length_km} km',
+               ha='center', va='top', fontsize=9, fontweight='bold',
+               transform=ccrs.PlateCarree())
+    
+    def create_annual_analysis(self):
+        """Create annual wind analysis plots"""
+        self.logger.info("Creating annual analysis...")
+        
+        # Get data at Charara location
+        charara_data = self._extract_charara_data()
+        
+        if charara_data is None:
+            self.logger.error("Could not extract Charara data")
+            return
+        
+        # Create multiple plots
+        fig = plt.figure(figsize=(20, 16))
+        
+        # 1. Annual time series
+        ax1 = plt.subplot(3, 2, 1)
+        self._plot_annual_timeseries(ax1, charara_data)
+        
+        # 2. Monthly climatology
+        ax2 = plt.subplot(3, 2, 2)
+        self._plot_monthly_climatology(ax2, charara_data)
+        
+        # 3. Seasonal box plot
+        ax3 = plt.subplot(3, 2, 3)
+        self._plot_seasonal_boxplot(ax3, charara_data)
+        
+        # 4. Wind speed distribution
+        ax4 = plt.subplot(3, 2, 4)
+        self._plot_wind_distribution(ax4, charara_data)
+        
+        # 5. Threshold exceedance
+        ax5 = plt.subplot(3, 2, 5)
+        self._plot_threshold_exceedance(ax5, charara_data)
+        
+        # 6. Statistics summary
+        ax6 = plt.subplot(3, 2, 6)
+        self._plot_statistics_summary(ax6, charara_data)
+        
+        # Add main title
+        main_title = (f'Comprehensive Wind Analysis - {self.site_name}\n'
+                     f'{self.start_year}-{self.end_year}')
+        plt.suptitle(main_title, fontsize=20, fontweight='bold', y=0.98)
+        
+        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        
+        # Save figure
+        output_file = config.get_output_filename(
+            'annual_wind_analysis',
+            'png',
+            'reports'
+        )
+        plt.savefig(output_file, dpi=300, bbox_inches='tight')
+        self.logger.info(f"Annual analysis saved to: {output_file}")
+        
+        plt.show()
+        
+        return fig
+    
+    def _extract_charara_data(self):
+        """Extract wind data at Charara location"""
+        try:
+            # Find nearest grid point
+            lats = self.wind_ds.latitude.values
+            lons = self.wind_ds.longitude.values
+            
+            lat_idx = np.abs(lats - self.charara_lat).argmin()
+            lon_idx = np.abs(lons - self.charara_lon).argmin()
+            
+            # Extract time series
+            if 'wind_speed_100m' in self.wind_ds:
+                data = self.wind_ds['wind_speed_100m'].isel(
+                    latitude=lat_idx, longitude=lon_idx
+                )
+            elif 'si10' in self.wind_ds:
+                data = self.wind_ds['si10'].isel(
+                    latitude=lat_idx, longitude=lon_idx
+                )
+            else:
+                return None
+            
+            self.logger.info(f"Charara data extracted at grid point: lat={lats[lat_idx]:.2f}, lon={lons[lon_idx]:.2f}")
+            return data
+            
+        except Exception as e:
+            self.logger.error(f"Error extracting Charara data: {e}")
+            return None
+    
+    def _plot_annual_timeseries(self, ax, data):
+        """Plot annual time series"""
+        # Resample to annual mean
+        annual_mean = data.resample(time='1Y').mean()
+        years = annual_mean.time.dt.year
+        
+        ax.plot(years, annual_mean.values, 'o-', linewidth=2, markersize=8, color='blue')
+        ax.fill_between(years, 0, annual_mean.values, alpha=0.3, color='blue')
+        
+        # Add trend line
+        if len(years) > 1:
+            z = np.polyfit(years, annual_mean.values, 1)
+            p = np.poly1d(z)
+            ax.plot(years, p(years), 'r--', alpha=0.7,
+                   label=f'Trend: {z[0]:.3f} m/s per year')
+        
+        ax.set_title(f'Annual Average Wind Speed\n{self.start_year}-{self.end_year}',
+                    fontsize=14, fontweight='bold')
+        ax.set_xlabel('Year', fontsize=12)
+        ax.set_ylabel('Wind Speed (m/s)', fontsize=12)
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+        # Add value labels
+        for year, value in zip(years, annual_mean.values):
+            ax.text(year, value + 0.05, f'{value:.2f}', 
+                   ha='center', va='bottom', fontsize=9)
+    
+    def _plot_monthly_climatology(self, ax, data):
+        """Plot monthly climatology"""
+        monthly_mean = data.groupby('time.month').mean()
+        months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+        
+        bars = ax.bar(months, monthly_mean.values, color='skyblue', alpha=0.7)
+        ax.set_title('Monthly Climatology', fontsize=14, fontweight='bold')
+        ax.set_ylabel('Wind Speed (m/s)', fontsize=12)
+        ax.grid(True, alpha=0.3, axis='y')
+        
+        # Add value labels
+        for bar, value in zip(bars, monthly_mean.values):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height + 0.05,
+                   f'{value:.2f}', ha='center', va='bottom', fontsize=9)
+    
+    def _plot_seasonal_boxplot(self, ax, data):
+        """Plot seasonal box plot"""
+        # Group by season
+        seasons = data.groupby('time.season')
+        season_order = ['DJF', 'MAM', 'JJA', 'SON']
+        season_names = ['Winter', 'Spring', 'Summer', 'Autumn']
+        
+        seasonal_data = []
+        for season in season_order:
+            if season in seasons.groups:
+                seasonal_data.append(seasons[season].values)
+        
+        box = ax.boxplot(seasonal_data, labels=season_names, patch_artist=True)
+        
+        # Customize box colors
+        colors = ['lightblue', 'lightgreen', 'lightcoral', 'lightsalmon']
+        for patch, color in zip(box['boxes'], colors):
+            patch.set_facecolor(color)
+        
+        ax.set_title('Seasonal Wind Speed Distribution', fontsize=14, fontweight='bold')
+        ax.set_ylabel('Wind Speed (m/s)', fontsize=12)
+        ax.grid(True, alpha=0.3, axis='y')
+    
+    def _plot_wind_distribution(self, ax, data):
+        """Plot wind speed distribution histogram"""
+        wind_speeds = data.values
+        wind_speeds = wind_speeds[~np.isnan(wind_speeds)]
+        
+        ax.hist(wind_speeds, bins=30, density=True, alpha=0.7, 
+               color='steelblue', edgecolor='black')
+        
+        # Add kernel density estimate
+        from scipy import stats
+        kde = stats.gaussian_kde(wind_speeds)
+        x_range = np.linspace(min(wind_speeds), max(wind_speeds), 100)
+        ax.plot(x_range, kde(x_range), 'r-', linewidth=2)
+        
+        ax.set_title('Wind Speed Distribution', fontsize=14, fontweight='bold')
+        ax.set_xlabel('Wind Speed (m/s)', fontsize=12)
+        ax.set_ylabel('Probability Density', fontsize=12)
+        ax.grid(True, alpha=0.3)
+        
+        # Add statistics
+        stats_text = (f'Mean: {np.mean(wind_speeds):.2f} m/s\n'
+                     f'Std Dev: {np.std(wind_speeds):.2f} m/s\n'
+                     f'Skewness: {stats.skew(wind_speeds):.2f}')
+        ax.text(0.95, 0.95, stats_text, transform=ax.transAxes,
+               verticalalignment='top', horizontalalignment='right',
+               fontsize=11, bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    def _plot_threshold_exceedance(self, ax, data):
+        """Plot threshold exceedance probabilities"""
+        wind_speeds = data.values
+        wind_speeds = wind_speeds[~np.isnan(wind_speeds)]
+        
+        thresholds = list(self.thresholds.values())
+        threshold_names = list(self.thresholds.keys())
+        
+        exceedance_percent = []
+        for threshold in thresholds:
+            exceedance = np.mean(wind_speeds >= threshold) * 100
+            exceedance_percent.append(exceedance)
+        
+        colors = ['green', 'yellow', 'orange', 'red']
+        bars = ax.bar(threshold_names, exceedance_percent, color=colors, alpha=0.7)
+        ax.set_title('Threshold Exceedance Probability', fontsize=14, fontweight='bold')
+        ax.set_ylabel('Percentage of Time (%)', fontsize=12)
+        ax.set_ylim(0, 100)
+        ax.grid(True, alpha=0.3, axis='y')
+        
+        # Add value labels
+        for bar, value in zip(bars, exceedance_percent):
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height + 1,
+                   f'{value:.1f}%', ha='center', va='bottom', fontsize=10)
+    
+    def _plot_statistics_summary(self, ax, data):
+        """Plot statistics summary table"""
+        ax.axis('off')
+        
+        wind_speeds = data.values
+        wind_speeds = wind_speeds[~np.isnan(wind_speeds)]
+        
+        # Calculate comprehensive statistics
+        stats_dict = {
+            'Analysis Period': f'{self.start_year}-{self.end_year}',
+            'Location': self.site_name,
+            'Coordinates': f'{abs(self.charara_lat):.2f}°S, {self.charara_lon:.2f}°E',
+            'Total Observations': f'{len(wind_speeds):,}',
+            'Mean Wind Speed': f'{np.mean(wind_speeds):.2f} m/s',
+            'Median Wind Speed': f'{np.median(wind_speeds):.2f} m/s',
+            'Std Deviation': f'{np.std(wind_speeds):.2f} m/s',
+            'Maximum Speed': f'{np.max(wind_speeds):.2f} m/s',
+            '95th Percentile': f'{np.percentile(wind_speeds, 95):.2f} m/s',
+            '90th Percentile': f'{np.percentile(wind_speeds, 90):.2f} m/s',
+            '75th Percentile': f'{np.percentile(wind_speeds, 75):.2f} m/s',
+            'Calm (< 1 m/s)': f'{np.mean(wind_speeds < 1) * 100:.1f}%',
+            'Storm (> 15 m/s)': f'{np.mean(wind_speeds > 15) * 100:.1f}%'
+        }
+        
+        # Create table
+        table_data = [[key, value] for key, value in stats_dict.items()]
+        
+        table = ax.table(cellText=table_data, loc='center', cellLoc='left')
+        table.auto_set_font_size(False)
+        table.set_fontsize(10)
+        table.scale(1, 1.5)
+        
+        # Style table
+        for i in range(len(table_data)):
+            cell = table[(i, 0)]
+            cell.set_facecolor('#f0f0f0')
+            cell.set_text_props(fontweight='bold')
+    
+    def save_statistics_csv(self):
+        """Save detailed statistics to CSV"""
+        self.logger.info("Saving statistics to CSV...")
+        
+        # Extract data
+        charara_data = self._extract_charara_data()
+        if charara_data is None:
+            return
+        
+        wind_speeds = charara_data.values
+        wind_speeds = wind_speeds[~np.isnan(wind_speeds)]
+        
+        # Create statistics dictionary
+        stats = {
+            'analysis_period': f'{self.start_year}-{self.end_year}',
+            'location': self.site_name,
+            'latitude': self.charara_lat,
+            'longitude': self.charara_lon,
+            'total_observations': len(wind_speeds),
+            'mean_wind_speed': np.mean(wind_speeds),
+            'median_wind_speed': np.median(wind_speeds),
+            'std_deviation': np.std(wind_speeds),
+            'variance': np.var(wind_speeds),
+            'skewness': float(pd.Series(wind_speeds).skew()),
+            'kurtosis': float(pd.Series(wind_speeds).kurtosis()),
+            'minimum': np.min(wind_speeds),
+            'maximum': np.max(wind_speeds),
+            'percentile_1': np.percentile(wind_speeds, 1),
+            'percentile_5': np.percentile(wind_speeds, 5),
+            'percentile_25': np.percentile(wind_speeds, 25),
+            'percentile_50': np.percentile(wind_speeds, 50),
+            'percentile_75': np.percentile(wind_speeds, 75),
+            'percentile_95': np.percentile(wind_speeds, 95),
+            'percentile_99': np.percentile(wind_speeds, 99),
+            'calm_below_1ms': np.mean(wind_speeds < 1) * 100,
+            'below_normal_op': np.mean(wind_speeds < self.thresholds['normal_operation']) * 100,
+            'normal_operation': np.mean((wind_speeds >= self.thresholds['normal_operation']) & 
+                                       (wind_speeds < self.thresholds['caution'])) * 100,
+            'caution': np.mean((wind_speeds >= self.thresholds['caution']) & 
+                              (wind_speeds < self.thresholds['danger'])) * 100,
+            'danger': np.mean((wind_speeds >= self.thresholds['danger']) & 
+                             (wind_speeds < self.thresholds['emergency_shutdown'])) * 100,
+            'emergency': np.mean(wind_speeds >= self.thresholds['emergency_shutdown']) * 100,
+            'analysis_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        # Create DataFrame
+        df_stats = pd.DataFrame([stats])
+        
+        # Save to CSV
+        output_file = config.get_output_filename(
+            'wind_statistics',
+            'csv',
+            'statistics'
+        )
+        df_stats.to_csv(output_file, index=False)
+        self.logger.info(f"Statistics saved to CSV: {output_file}")
+        
+        # Also save as JSON for easier reading
+        json_file = output_file.replace('.csv', '.json')
+        df_stats.to_json(json_file, orient='records', indent=2)
+        self.logger.info(f"Statistics saved to JSON: {json_file}")
+        
+        return df_stats
+    
+    def run_complete_analysis(self):
+        """Run complete wind analysis pipeline"""
+        self.logger.info("="*80)
+        self.logger.info(f"STARTING COMPLETE WIND ANALYSIS: {self.start_year}-{self.end_year}")
+        self.logger.info("="*80)
+        
+        try:
+            # 1. Create seasonal maps
+            self.logger.info("Step 1: Creating seasonal wind maps...")
+            seasonal_fig, _ = self.create_seasonal_wind_maps()
+            
+            # 2. Create annual analysis
+            self.logger.info("Step 2: Creating annual analysis...")
+            annual_fig = self.create_annual_analysis()
+            
+            # 3. Save statistics
+            self.logger.info("Step 3: Saving statistics...")
+            stats_df = self.save_statistics_csv()
+            
+            # 4. Create summary report
+            self.logger.info("Step 4: Creating summary report...")
+            self.create_summary_report(stats_df)
+            
+            self.logger.info("="*80)
+            self.logger.info("ANALYSIS COMPLETE!")
+            self.logger.info(f"All outputs saved to: {config.get_path('paths.output.base')}")
+            self.logger.info("="*80)
+            
+            return {
+                'seasonal_maps': seasonal_fig,
+                'annual_analysis': annual_fig,
+                'statistics': stats_df
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error in analysis: {e}")
+            raise
+    
+    def create_summary_report(self, stats_df):
+        """Create a text summary report"""
+        self.logger.info("Creating summary report...")
+        
+        report_lines = [
+            "="*80,
+            f"WIND ANALYSIS SUMMARY REPORT",
+            f"Location: {self.site_name}",
+            f"Analysis Period: {self.start_year}-{self.end_year}",
+            f"Report Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "="*80,
+            "",
+            "KEY FINDINGS:",
+            "",
+        ]
+        
+        if stats_df is not None:
+            stats = stats_df.iloc[0].to_dict()
+            
+            # Add key statistics
+            report_lines.extend([
+                f"1. Mean Wind Speed: {stats['mean_wind_speed']:.2f} m/s",
+                f"2. Maximum Wind Speed: {stats['maximum']:.2f} m/s",
+                f"3. 95th Percentile: {stats['percentile_95']:.2f} m/s",
+                "",
+                "OPERATIONAL IMPLICATIONS:",
+                "",
+                f"• Normal Operation (< {self.thresholds['normal_operation']} m/s): {stats['below_normal_op']:.1f}% of time",
+                f"• Caution ({self.thresholds['normal_operation']}-{self.thresholds['caution']} m/s): {stats['normal_operation']:.1f}%",
+                f"• Danger ({self.thresholds['caution']}-{self.thresholds['danger']} m/s): {stats['caution']:.1f}%",
+                f"• Emergency (> {self.thresholds['danger']} m/s): {stats['danger']:.1f}%",
+                "",
+                "RECOMMENDATIONS:",
+                "",
+                "1. Design floating solar system for maximum wind speed of "
+                f"{max(stats['maximum'], stats['percentile_99']):.1f} m/s",
+                "2. Implement automatic tilt adjustment for winds above "
+                f"{self.thresholds['caution']} m/s",
+                "3. Regular maintenance during calm periods (< 5 m/s)",
+                "4. Monitor seasonal variations for optimal tilt angles",
+            ])
+        
+        # Save report
+        output_file = config.get_output_filename(
+            'wind_analysis_summary',
+            'txt',
+            'reports'
+        )
+        
+        with open(output_file, 'w') as f:
+            f.write('\n'.join(report_lines))
+        
+        self.logger.info(f"Summary report saved to: {output_file}")
+        
+        # Print to console
+        print('\n'.join(report_lines))
+
+
+def main():
+    """Main execution function"""
+    # Print configuration summary
+    config.print_summary()
+    
+    # Initialize and run analysis
+    analyzer = EnhancedWindAnalysis()
+    
+    # Run complete analysis
+    results = analyzer.run_complete_analysis()
+    
+    print(f"\n{'='*80}")
+    print("ANALYSIS SUCCESSFULLY COMPLETED!")
+    print(f"Check the output directory: {config.get_path('paths.output.base')}")
+    print(f"{'='*80}")
+    
+    return analyzer, results
+
+
+if __name__ == "__main__":
+    # Run analysis
+    analyzer, results = main()
