@@ -18,7 +18,7 @@ python scripts/run_analysis.py
 ```
 
 ## Repository
-https://github.com/chawas/lake-kariba-wind-analysis
+https://github.com/chawas/charara
 
 ## License
 MIT License
